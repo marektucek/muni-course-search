@@ -63,12 +63,12 @@ export async function POST(request) {
       recommendations = JSON.parse(cleaned);
     }
 
-    // Attach full course metadata back to each recommendation
+    // Attach full course metadata back to each recommendation,
+    // then sort by cosine similarity score so the closest match is always first.
     const byCode = Object.fromEntries(candidates.map((c) => [c.code, c]));
-    const enriched = recommendations.map((rec) => ({
-      ...byCode[rec.code],
-      reasoning: rec.reasoning,
-    }));
+    const enriched = recommendations
+      .map((rec) => ({ ...byCode[rec.code], reasoning: rec.reasoning }))
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 
     return Response.json({ recommendations: enriched });
   } catch (err) {
