@@ -1,0 +1,11 @@
+.next/
+node_modules/
+.env.local
+env.local
+.env
+.DS_Store
+.claude/
+data/courses_raw.json
+data/courses_raw*.json
+data/courses_embedded.json
+data/courses_urls.json

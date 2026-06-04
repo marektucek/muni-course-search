@@ -1,0 +1,9 @@
+{
+  "buildCommand": "next build",
+  "outputDirectory": ".next",
+  "framework": "nextjs",
+  "functions": {
+    "app/api/search/route.js": { "maxDuration": 30 },
+    "app/api/recommend/route.js": { "maxDuration": 30 }
+  }
+}
