@@ -9,3 +9,10 @@ data/courses_raw.json
 data/courses_raw*.json
 data/courses_embedded.json
 data/courses_urls.json
+.vercel
+
+# Prezentator scraper leftovers — not part of the app
+prezentator*.xml
+prezentator*.rtf
+prezentator*.txt
+scripts/parse-prezentator.js

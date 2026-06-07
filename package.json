@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "scrape": "node scripts/scrape.js",
+    "parse": "node scripts/parse-prezentator.js",
     "embed": "node scripts/embed.js"
   },
   "keywords": [],
@@ -15,6 +16,7 @@
   "license": "ISC",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@supabase/supabase-js": "^2.107.0",
     "dotenv": "^17.4.2",
     "next": "^16.2.7",
     "playwright": "^1.60.0",

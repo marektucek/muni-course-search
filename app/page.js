@@ -1,7 +1,74 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import "./globals.css";
+
+const LIMITATIONS = [
+  {
+    title: "Nezaručuje, že se na kurz dostaneš",
+    text: "Nástroj neví nic o podmínkách zápisu, prerekvizitách ani o tom, zda je kurz otevřen pro tvůj studijní program. To si ověř v IS.",
+  },
+  {
+    title: "Kurzy nemusí být aktuálně vypsané",
+    text: "Data pochází z podzimního 2026 a jarního 2027 semestru. Kurz se v aktuálním semestru nemusí konat. Vždy zkontroluj aktuální nabídku v IS.",
+  },
+  {
+    title: "Funguje pouze s českými dotazy",
+    text: "Kurzy jsou embedovány v češtině. Dotazy v angličtině nebo jiných jazycích budou fungovat výrazně hůře — piš česky.",
+  },
+  {
+    title: "Pouze Filozofická fakulta",
+    text: "Databáze obsahuje pouze kurzy FF MU. Kurzy jiných fakult MUNI nejsou zahrnuty.",
+  },
+  {
+    title: "Databáze není kompletní — jde o proof of concept",
+    text: "V tuto chvíli obsahuje databáze pouze část kurzů FF MU. Nástroj slouží jako ukázka konceptu, ne jako plně funkční vyhledávač. Kompletní verze je v přípravě.",
+  },
+];
+
+function InfoPanel() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  return (
+    <div className="info-wrap" ref={ref}>
+      <button
+        className="info-trigger"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-label="Co tento nástroj dělá a co ne"
+      >
+        <span className="info-icon">ⓘ</span> Před vyhledáváním si přečti
+      </button>
+
+      {open && (
+        <div className="info-panel" role="dialog" aria-modal="false">
+          <div className="info-panel-header">
+            <span className="info-panel-title">Co tento nástroj dělá — a co ne</span>
+            <button className="info-close" onClick={() => setOpen(false)} aria-label="Zavřít">✕</button>
+          </div>
+          <ul className="info-list">
+            {LIMITATIONS.map((item) => (
+              <li key={item.title} className="info-item">
+                <span className="info-item-title">⚠ {item.title}</span>
+                <span className="info-item-text">{item.text}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
 const COMPLETION_LABELS = {
   zk: "Zkouška",
@@ -137,7 +204,14 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: trimmed }),
       });
-      if (!searchRes.ok) throw new Error("Hledání selhalo.");
+      if (!searchRes.ok) {
+        const body = await searchRes.json().catch(() => ({}));
+        if (body.error === "quota_exceeded") {
+          const when = body.retryIn ? ` Zkuste to znovu za ${body.retryIn}.` : "";
+          throw new Error(`Služba je momentálně nedostupná — byl vyčerpán denní limit dotazů.${when}`);
+        }
+        throw new Error("Hledání selhalo. Zkuste to znovu.");
+      }
       const { candidates } = await searchRes.json();
 
       setStatus("recommending");
@@ -147,7 +221,13 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: trimmed, candidates }),
       });
-      if (!recRes.ok) throw new Error("Generování doporučení selhalo.");
+      if (!recRes.ok) {
+        const body = await recRes.json().catch(() => ({}));
+        if (body.error === "model_overloaded") {
+          throw new Error("AI model je momentálně přetížený. Zkuste to znovu za chvíli.");
+        }
+        throw new Error("Generování doporučení selhalo. Zkuste to znovu.");
+      }
       const { recommendations } = await recRes.json();
 
       setResults(recommendations);
@@ -171,6 +251,7 @@ export default function Home() {
 
       <main className="container">
         <section className="search-section">
+          <InfoPanel />
           <form className="search-form" onSubmit={handleSubmit}>
             <textarea
               className="search-input"

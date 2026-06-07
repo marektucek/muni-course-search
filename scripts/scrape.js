@@ -21,6 +21,16 @@ function sleep(ms) {
 
 // Returns a random delay that mimics the uneven cadence of a human clicking
 // through pages — mostly 1.5–3 s with occasional longer pauses.
+// Moves the mouse in a short random arc to mimic natural cursor movement.
+// Called before navigating to a new page so the browser's pointer event log
+// doesn't look like a script that teleports between coordinates.
+async function jitterMouse(page) {
+  const steps = 3 + Math.floor(Math.random() * 4);
+  const x = 200 + Math.floor(Math.random() * 600);
+  const y = 200 + Math.floor(Math.random() * 400);
+  await page.mouse.move(x, y, { steps });
+}
+
 function humanDelay() {
   const r = Math.random();
   if (r < 0.10) return 4000 + Math.random() * 4000;  // 10%: 4–8 s (distracted)
@@ -122,88 +132,95 @@ function extractOpenAccess(html) {
   return null;
 }
 
-// Pass 1: page through the catalog and return every unique {code, name, href}.
-// Does NOT visit detail pages — only catalog list pages.
-async function collectCourseUrls(page, semester) {
-  const listUrl = `${BASE_URL}/predmety/?lang=cs;fakulta=1421;obdobi=${semester}`;
-  console.log(`\n[Pass 1] Collecting URLs for ${semester}`);
+// Pass 1: collect all unique course URLs using the katalog AJAX endpoint.
+// POSTs to /predmety/predmety_ajax.pl from inside the browser context so that
+// session cookies are inherited automatically — no manual cookie handling.
+// Both semesters are fetched in a single session using the combined terms filter.
+async function collectCourseUrls(page) {
+  console.log(`\n[Pass 1] Collecting course URLs via AJAX endpoint`);
+
+  // Extract pvysl from the current page (katalog embeds it in the HTML)
+  const pvysl = await page.evaluate(() => {
+    const m = document.documentElement.innerHTML.match(/['"](pvysl)['"]\s*[,:]\s*['"]?(\d+)/);
+    if (m) return m[2];
+    // Fallback: look in any input or data attribute
+    const inp = document.querySelector('input[name="pvysl"]');
+    if (inp) return inp.value;
+    return null;
+  });
+  console.log(`  pvysl: ${pvysl}`);
+
+  // Term format used by the katalog: "podzim 2026" and "jaro 2027" (with space)
+  const terms = SEMESTERS.map((s) => s.replace(/(\D+)(\d+)/, "$1 $2")); // "podzim2026" → "podzim 2026"
 
   const seen = new Set();
-  const courses = []; // {code, name, href}
-  let pageNum = 1;
-  let pvysl = null;
+  const courses = [];
 
-  while (true) {
-    const url =
-      pageNum === 1
-        ? listUrl
-        : `${BASE_URL}/predmety/?lang=cs;pvysl=${pvysl};fakulta=1421;obdobi=${semester};start=${(pageNum - 1) * 50}`;
+  // Request all results in a single call. The server ignores small records_per_page
+  // values and returns ~300 rows anyway, so asking for 99999 gets everything at once
+  // and avoids the need for pagination entirely.
+  const { html } = await page.evaluate(
+      async ({ pvysl, terms }) => {
+        const body = new URLSearchParams({
+          type: "result",
+          operace: "get_courses",
+          filters: JSON.stringify({
+            offered: ["1"],
+            faculties: ["1421"],
+            depts_type: ["3"],
+            terms,
+          }),
+          pvysl: pvysl ?? "",
+          search_text: "",
+          records_per_page: "99999",
+          start: "0",
+          origin_path_info: "/predmety/katalog",
+        });
 
-    await page.goto(url, { waitUntil: "networkidle" });
+        const res = await fetch("/predmety/predmety_ajax.pl", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+          },
+          body: body.toString(),
+          credentials: "same-origin",
+        });
 
-    // Grab pvysl from the first page for stable subsequent pagination
-    if (pageNum === 1) {
-      const hrefs = await page.$$eval("a[href]", (ls) =>
-        ls.map((a) => a.getAttribute("href") || "")
-      );
-      const pvyslHref = hrefs.find((h) => h.includes("pvysl="));
-      pvysl = pvyslHref?.match(/pvysl=(\d+)/)?.[1] ?? null;
-      console.log(`  pvysl: ${pvysl}`);
-    }
+        return await res.text();
+      },
+      { pvysl, terms }
+  );
 
-    const rows = await page.$$eval("a[href]", (links) =>
-      links
-        .map((a) => ({ href: a.getAttribute("href") || "", text: a.textContent.trim() }))
-        .filter(({ href, text }) => href.includes("/predmet/phil/") && text.length > 0)
-        .map(({ href, text }) => ({
-          code: href.split("/").filter(Boolean).pop().split(";")[0].split("?")[0],
-          name: text,
-          href: href.startsWith("http") ? href : `https://is.muni.cz${href}`,
-        }))
-    );
-
-    // Count new vs already-seen to track how much the catalog repeats itself
-    let newOnPage = 0;
-    for (const row of rows) {
-      if (!seen.has(row.href)) {
-        seen.add(row.href);
-        courses.push(row);
-        newOnPage++;
-      }
-    }
-
-    process.stdout.write(
-      `  Page ${pageNum}: ${rows.length} links, ${newOnPage} new, ${courses.length} unique so far\n`
-    );
-
-    // Stop when the page returns no links at all (past the end of the catalog)
-    if (rows.length === 0) break;
-
-    // Stop when we get two consecutive pages with zero new courses — the catalog
-    // has looped back and is only showing already-seen entries.
-    if (newOnPage === 0) {
-      // Check one more page to be sure
-      pageNum++;
-      const nextUrl = `${BASE_URL}/predmety/?lang=cs;pvysl=${pvysl};fakulta=1421;obdobi=${semester};start=${(pageNum - 1) * 50}`;
-      await page.goto(nextUrl, { waitUntil: "networkidle" });
-      const nextRows = await page.$$eval("a[href]", (links) =>
-        links
-          .filter((a) => (a.getAttribute("href") || "").includes("/predmet/phil/"))
-          .map((a) => a.getAttribute("href") || "")
-      );
-      const hasNew = nextRows.some((h) => !seen.has(h.startsWith("http") ? h : `https://is.muni.cz${h}`));
-      if (!hasNew) {
-        console.log(`  No new courses on two consecutive pages — catalog exhausted.`);
-        break;
-      }
-      // There were new ones after all; continue from the page we just loaded
-      continue;
-    }
-
-    pageNum++;
+  if (!html || html.trim().length === 0) {
+    console.log("  Warning: empty response. HTML snippet:", html?.slice(0, 300));
+    return courses;
   }
 
-  console.log(`  Done — ${courses.length} unique course URLs for ${semester}`);
+  // Parse all course links out of the single response
+  const rows = await page.evaluate((html) => {
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    return Array.from(tmp.querySelectorAll("a[href]"))
+      .map((a) => ({ href: a.getAttribute("href") || "", text: a.textContent.trim() }))
+      .filter(({ href }) => href.includes("/predmet/"))
+      .map(({ href, text }) => ({
+        code: href.split("/").filter(Boolean).pop().split(";")[0].split("?")[0],
+        name: text,
+        href: href.startsWith("http") ? href : `https://is.muni.cz${href}`,
+      }));
+  }, html);
+
+  console.log(`  Server returned ${rows.length} course rows`);
+
+  for (const row of rows) {
+    if (!seen.has(row.href)) {
+      seen.add(row.href);
+      courses.push(row);
+    }
+  }
+
+  console.log(`  Done — ${courses.length} unique course URLs`);
   return courses;
 }
 
@@ -222,6 +239,7 @@ async function scrapeDetails(page, semester, courseList, scrapedUrls, allCourses
     }
 
     await sleep(humanDelay());
+    await jitterMouse(page);
     try {
       await page.goto(row.href, { waitUntil: "domcontentloaded" });
       const html = await page.content();
@@ -296,44 +314,101 @@ async function main() {
     fs.writeFileSync(outPath, JSON.stringify(allCourses, null, 2));
   }
 
-  // Run headed so the user can solve any CAPTCHA
-  const browser = await chromium.launch({ headless: false });
-  const page = await browser.newPage();
+  // Run headed so the user can solve any CAPTCHA.
+  // Launch flags strip Chromium's automation fingerprints.
+  // Use the real installed Chrome instead of Playwright's bundled Chromium.
+  // This bypasses TLS/HTTP2 fingerprint detection that flags Playwright's binary.
+  const browser = await chromium.launch({
+    headless: false,
+    executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=IsolateOrigins,site-per-process",
+      "--no-sandbox",
+    ],
+  });
+
+  // Randomise viewport slightly so every session looks different
+  const viewportWidth  = 1280 + Math.floor(Math.random() * 200);
+  const viewportHeight = 900  + Math.floor(Math.random() * 120);
+
+  const context = await browser.newContext({
+    viewport: { width: viewportWidth, height: viewportHeight },
+    userAgent:
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+      "AppleWebKit/537.36 (KHTML, like Gecko) " +
+      "Chrome/124.0.0.0 Safari/537.36",
+    locale: "cs-CZ",
+    timezoneId: "Europe/Prague",
+    extraHTTPHeaders: {
+      "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
+      "Accept":
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    },
+  });
+
+  // Patch JS properties that fingerprint automation even after the launch flags
+  await context.addInitScript(() => {
+    // Remove webdriver flag
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    // Spoof plugins list (empty in headless, populated in real Chrome)
+    Object.defineProperty(navigator, "plugins", {
+      get: () => [1, 2, 3, 4, 5], // non-zero length is enough
+    });
+    // Spoof language
+    Object.defineProperty(navigator, "languages", {
+      get: () => ["cs-CZ", "cs", "en-US", "en"],
+    });
+    // Remove the automation-specific chrome.runtime property pattern
+    window.chrome = { runtime: {} };
+  });
+
+  const page = await context.newPage();
   page.setDefaultTimeout(60000);
 
-  // Open the browser to a blank page — let the user navigate manually so they
-  // can handle login, CAPTCHA, or any other gate without a script timeout.
-  const targetUrl = `${BASE_URL}/predmety/?lang=cs;fakulta=1421;obdobi=${SEMESTERS[0]}`;
+  // Send the user to the katalog page — this is where the AJAX endpoint lives
+  // and where the pvysl session token is generated.
   await page.goto("about:blank");
   console.log("\nBrowser is open.");
-  console.log(`Navigate to: ${targetUrl}`);
-  console.log("Solve any CAPTCHA and wait until the course list is fully visible.");
+  console.log(`Navigate to: ${BASE_URL}/predmety/katalog`);
+  console.log("Solve any CAPTCHA, apply the FF faculty filter for both semesters,");
+  console.log("and wait until the course list is fully visible.");
   await waitForEnter("Then press Enter here to start scraping... ");
 
+  // Pass 1: collect all unique URLs for both semesters in one AJAX session
+  let courseList;
+  const urlCache = fs.existsSync(urlCachePath)
+    ? JSON.parse(fs.readFileSync(urlCachePath, "utf-8"))
+    : {};
+
+  if (urlCache["all"]) {
+    console.log(`\nUsing cached URL list (${urlCache["all"].length} courses)`);
+    courseList = urlCache["all"];
+  } else {
+    courseList = await collectCourseUrls(page);
+    urlCache["all"] = courseList;
+    fs.writeFileSync(urlCachePath, JSON.stringify(urlCache, null, 2));
+  }
+
+  // Pass 2: visit each detail page — assign semester from SEMESTERS based on
+  // which term IS links the detail to (encoded in the URL path).
   for (const semester of SEMESTERS) {
-    // Pass 1: collect all unique URLs (fast — only catalog pages, no detail visits)
-    let courseList;
-    const urlCacheKey = `${semester}`;
-
-    // Re-use cached URL list if available so re-runs skip Pass 1 entirely
-    const urlCache = fs.existsSync(urlCachePath)
-      ? JSON.parse(fs.readFileSync(urlCachePath, "utf-8"))
-      : {};
-
-    if (urlCache[urlCacheKey]) {
-      console.log(`\nUsing cached URL list for ${semester} (${urlCache[urlCacheKey].length} courses)`);
-      courseList = urlCache[urlCacheKey];
-    } else {
-      courseList = await collectCourseUrls(page, semester);
-      urlCache[urlCacheKey] = courseList;
-      fs.writeFileSync(urlCachePath, JSON.stringify(urlCache, null, 2));
-    }
-
-    // Pass 2: visit each detail page
-    await scrapeDetails(page, semester, courseList, scrapedUrls, allCourses, checkpoint);
+    // Filter courseList to those whose URL contains this semester (e.g. podzim2026)
+    const semesterList = courseList.filter((c) => c.href.includes(semester));
+    console.log(`\nSemester ${semester}: ${semesterList.length} courses`);
+    await scrapeDetails(page, semester, semesterList, scrapedUrls, allCourses, checkpoint);
     console.log(`\nSemester ${semester} complete.`);
   }
 
+  // Also scrape any courses whose URL doesn't match either semester (edge cases)
+  const matchedUrls = new Set(SEMESTERS.flatMap((s) => courseList.filter((c) => c.href.includes(s)).map((c) => c.href)));
+  const unmatched = courseList.filter((c) => !matchedUrls.has(c.href));
+  if (unmatched.length > 0) {
+    console.log(`\nScraping ${unmatched.length} unmatched-semester courses...`);
+    await scrapeDetails(page, "unknown", unmatched, scrapedUrls, allCourses, checkpoint);
+  }
+
+  await context.close();
   await browser.close();
   checkpoint();
   console.log(`\nAll done. Total saved: ${allCourses.length} courses → ${outPath}`);

@@ -73,6 +73,12 @@ export async function POST(request) {
     return Response.json({ recommendations: enriched });
   } catch (err) {
     console.error("Recommend error:", err);
-    return Response.json({ error: "Recommendation failed" }, { status: 500 });
+
+    // Gemini overloaded — temporary, user should retry
+    if (err?.status === 503) {
+      return Response.json({ error: "model_overloaded" }, { status: 503 });
+    }
+
+    return Response.json({ error: "recommend_failed" }, { status: 500 });
   }
 }
